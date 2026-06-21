@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "SAJ Payments",
+    "slug": "saj-payments",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.sajtech.paymentfollowup",
+      "backgroundColor": "#090d16"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "project": "saj-survey-erp-saas-f70ce",
+  "hosting": {
+    "public": "admin-portal/out",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
