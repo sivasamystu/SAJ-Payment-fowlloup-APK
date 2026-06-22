@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -10,9 +10,22 @@ import {
   StatusBar,
   Alert,
   Dimensions,
-  ActivityIndicator
+  ActivityIndicator,
+  Platform,
+  PanResponder,
+  NativeModules
 } from 'react-native';
-import { ExpoStatusBar } from 'expo-status-bar';
+import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
+
+// Safe dynamic require for SMS User Consent to prevent crash in Expo Go
+let useSmsUserConsentHook = (digits: number): string => '';
+if (Platform.OS === 'android' && NativeModules.ReactNativeSmsUserConsent) {
+  try {
+    useSmsUserConsentHook = require('@eabdullazyanov/react-native-sms-user-consent').useSmsUserConsent;
+  } catch (err) {
+    console.warn('Failed to load SMS user consent module:', err);
+  }
+}
 
 // Device Dimensions
 const { width } = Dimensions.get('window');
@@ -76,6 +89,62 @@ export default function App() {
   const [userName, setUserName] = useState<string>('Karthik Raja (Admin)');
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
 
+  // Mobile OTP Auth State
+  const [loginMobile, setLoginMobile] = useState('');
+  const [loginOtp, setLoginOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [authToken, setAuthToken] = useState<string>('');
+
+  // SMS OTP Auto-retrieval (Android User Consent API)
+  const retrievedCode = useSmsUserConsentHook(6);
+
+  React.useEffect(() => {
+    if (retrievedCode && retrievedCode.length === 6 && otpSent) {
+      setLoginOtp(retrievedCode);
+      verifyOtpRequest(retrievedCode);
+    }
+  }, [retrievedCode, otpSent]);
+
+  // Swipe Navigation Gestures
+  const TABS = ['Dashboard', 'Customers', 'SurveyWorks', 'Invoices', 'Settings'];
+
+  const handleSwipe = (direction: 'LEFT' | 'RIGHT') => {
+    const currentIndex = TABS.indexOf(currentScreen);
+    if (currentIndex === -1) return;
+
+    if (direction === 'LEFT') {
+      // Next tab (finger swipes left, content shifts left, screen moves right)
+      if (currentIndex < TABS.length - 1) {
+        setCurrentScreen(TABS[currentIndex + 1]);
+      }
+    } else if (direction === 'RIGHT') {
+      // Previous tab (finger swipes right, content shifts right, screen moves left)
+      if (currentIndex > 0) {
+        setCurrentScreen(TABS[currentIndex - 1]);
+      }
+    }
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        // Intercept touches if horizontal movement is dominant and significant
+        return (
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 2.5 &&
+          Math.abs(gestureState.dx) > 30
+        );
+      },
+      onPanResponderRelease: (evt, gestureState) => {
+        if (gestureState.dx < -50) {
+          handleSwipe('LEFT');
+        } else if (gestureState.dx > 50) {
+          handleSwipe('RIGHT');
+        }
+      },
+    })
+  ).current;
+
   // Core Data States
   const [customers, setCustomers] = useState<Customer[]>([
     { id: '1', name: 'Apex Infrastructure Ltd', mobile: '9876543210', whatsapp: '9876543210', email: 'billing@apexinfra.com', companyName: 'Apex Infrastructure Ltd', address: 'Plot 45, Sector 12, Tech Park, Chennai', gstNumber: '33AAAAA1111A1Z1', notes: 'Frequent customer for topography layouts' },
@@ -124,14 +193,115 @@ export default function App() {
 
   const [searchVal, setSearchVal] = useState('');
 
-  const handleLogin = (role: 'TENANT_ADMIN' | 'STAFF') => {
-    setUserRole(role);
-    setUserName(role === 'TENANT_ADMIN' ? 'Karthik Raja (Admin)' : 'Srinivasan M (Field Staff)');
-    setCurrentScreen('Dashboard');
+  const API_URL = 'http://localhost:3001/api';
+
+  const sendOtpRequest = async () => {
+    if (!loginMobile) {
+      Alert.alert('Error', 'Please enter your mobile number.');
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      const response = await fetch(`${API_URL}/auth/send-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mobileNumber: loginMobile }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to send OTP');
+      }
+      setOtpSent(true);
+      Alert.alert('Success', 'Verification code sent!');
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Something went wrong while sending OTP.');
+    } finally {
+      setLoginLoading(false);
+    }
   };
 
-  const handleLogout = () => {
-    setCurrentScreen('Login');
+  const verifyOtpRequest = async (otpValue?: string) => {
+    const otpToVerify = otpValue || loginOtp;
+    if (!otpToVerify) {
+      Alert.alert('Error', 'Please enter the 6-digit OTP');
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      const response = await fetch(`${API_URL}/auth/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mobileNumber: loginMobile, otp: otpToVerify }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Invalid OTP');
+      }
+
+      setAuthToken(data.token);
+      setUserRole(data.user.role);
+      setUserName(`${data.user.name} (${data.user.role === 'TENANT_ADMIN' ? 'Admin' : 'Staff'})`);
+      setCurrentScreen('Dashboard');
+      // Reset form states
+      setLoginMobile('');
+      setLoginOtp('');
+      setOtpSent(false);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Verification failed.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const logoutThisDevice = async () => {
+    try {
+      if (authToken) {
+        await fetch(`${API_URL}/auth/logout-device`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('Logout device api error:', e);
+    } finally {
+      setAuthToken('');
+      setCurrentScreen('Login');
+    }
+  };
+
+  const logoutAllDevices = async () => {
+    try {
+      if (authToken) {
+        await fetch(`${API_URL}/auth/logout-all`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${authToken}`,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('Logout all api error:', e);
+    } finally {
+      setAuthToken('');
+      setCurrentScreen('Login');
+    }
+  };
+
+  const handleLogoutPress = () => {
+    Alert.alert(
+      'Log Out Options',
+      'Select how you want to sign out of your account:',
+      [
+        { text: 'Logout This Device', onPress: logoutThisDevice },
+        { text: 'Logout All Devices', onPress: logoutAllDevices, style: 'destructive' },
+        { text: 'Cancel', style: 'cancel' }
+      ],
+      { cancelable: true }
+    );
   };
 
   // Create Actions
@@ -250,7 +420,7 @@ export default function App() {
 
   const simulatePaymentReceived = (inv: Invoice) => {
     setInvoices(invoices.map(i => i.id === inv.id ? { ...i, status: 'PAID' } : i));
-    
+
     // update linked survey work to paid
     if (inv.surveyWorkNumber) {
       setSurveyWorks(surveyWorks.map(w => w.workNumber === inv.surveyWorkNumber ? { ...w, status: 'PAID' } : w));
@@ -309,34 +479,104 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
-      <View style={{ flex: 1 }}>
+      <View
+        style={{ flex: 1 }}
+        {...(TABS.includes(currentScreen) ? panResponder.panHandlers : {})}
+      >
         {/* LOGIN SCREEN */}
         {currentScreen === 'Login' && (
           <ScrollView contentContainerStyle={styles.loginContainer}>
-            <View style={styles.loginCard}>
-              <View style={styles.loginLogoContainer}>
-                <View style={styles.loginLogoIcon}>
-                  <Text style={styles.logoText}>SAJ</Text>
+            <View style={{ flex: 1, justifyContent: 'center', width: '100%', alignItems: 'center', marginTop: -45 }}>
+              <View style={styles.loginCard}>
+                <View style={styles.loginLogoContainer}>
+                  <View style={styles.loginLogoIcon}>
+                    <Text style={styles.logoText}>SAJ</Text>
+                  </View>
+                  <Text style={styles.loginLogoTitle}>SAJ Payments</Text>
+                  <Text style={styles.loginSubtitle}>Billing Follow-up & Collections</Text>
                 </View>
-                <Text style={styles.loginLogoTitle}>SAJ Technologies</Text>
-                <Text style={styles.loginSubtitle}>Payment Follow-up & Collections</Text>
+
+                <View style={styles.formContainer}>
+                  {!otpSent ? (
+                    <>
+                      <Text style={styles.inputLabel}>MOBILE NUMBER</Text>
+                      <TextInput
+                        style={styles.input}
+                        placeholder="e.g. +919876543210"
+                        placeholderTextColor="#64748b"
+                        keyboardType="phone-pad"
+                        value={loginMobile}
+                        onChangeText={setLoginMobile}
+                        editable={!loginLoading}
+                      />
+
+                      <TouchableOpacity
+                        style={styles.primaryButton}
+                        onPress={sendOtpRequest}
+                        disabled={loginLoading}
+                      >
+                        {loginLoading ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <Text style={styles.primaryButtonText}>Send OTP</Text>
+                        )}
+                      </TouchableOpacity>
+                    </>
+                  ) : (
+                    <>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <Text style={{ color: '#94a3b8', fontSize: 12 }}>Sending to: {loginMobile}</Text>
+                        <TouchableOpacity onPress={() => setOtpSent(false)}>
+                          <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: 'bold' }}>Edit</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <Text style={styles.inputLabel}>ENTER 6-DIGIT OTP</Text>
+                      <TextInput
+                        style={styles.input}
+                        placeholder="••••••"
+                        placeholderTextColor="#64748b"
+                        keyboardType="number-pad"
+                        maxLength={6}
+                        value={loginOtp}
+                        onChangeText={(val) => {
+                          setLoginOtp(val);
+                          if (val.length === 6) {
+                            verifyOtpRequest(val);
+                          }
+                        }}
+                        editable={!loginLoading}
+                        textContentType="oneTimeCode"
+                        autoComplete="sms-otp"
+                      />
+
+                      <TouchableOpacity
+                        style={styles.primaryButton}
+                        onPress={() => verifyOtpRequest()}
+                        disabled={loginLoading}
+                      >
+                        {loginLoading ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <Text style={styles.primaryButtonText}>Verify & Login</Text>
+                        )}
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={styles.secondaryButton}
+                        onPress={sendOtpRequest}
+                        disabled={loginLoading}
+                      >
+                        <Text style={styles.secondaryButtonText}>Resend OTP</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
               </View>
-
-              <View style={styles.formContainer}>
-                <Text style={styles.inputLabel}>EMAIL ADDRESS</Text>
-                <TextInput style={styles.input} placeholder="admin@sajsurveys.com" placeholderTextColor="#64748b" />
-
-                <Text style={styles.inputLabel}>PASSWORD</Text>
-                <TextInput style={styles.input} secureTextEntry placeholder="••••••••" placeholderTextColor="#64748b" />
-
-                <TouchableOpacity style={styles.primaryButton} onPress={() => handleLogin('TENANT_ADMIN')}>
-                  <Text style={styles.primaryButtonText}>Login as Tenant Admin</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.secondaryButton} onPress={() => handleLogin('STAFF')}>
-                  <Text style={styles.secondaryButtonText}>Login as Field Staff</Text>
-                </TouchableOpacity>
-              </View>
+            </View>
+            <View style={styles.loginFooter}>
+              <Text style={styles.loginFooterText}>Developed & Powered by</Text>
+              <Text style={[styles.loginFooterText, { fontWeight: '600', marginTop: 2 }]}>SAJ Technologies Pvt Ltd</Text>
             </View>
           </ScrollView>
         )}
@@ -863,8 +1103,11 @@ export default function App() {
               </View>
 
               <View style={[styles.formContainer, { marginTop: 15 }]}>
-                <TouchableOpacity style={[styles.secondaryButton, { borderColor: '#ef4444' }]} onPress={handleLogout}>
-                  <Text style={{ color: '#ef4444', fontWeight: 'bold' }}>Disconnect Session</Text>
+                <TouchableOpacity
+                  style={[styles.secondaryButton, { borderColor: '#ef4444' }]}
+                  onPress={handleLogoutPress}
+                >
+                  <Text style={{ color: '#ef4444', fontWeight: 'bold' }}>Log Out</Text>
                 </TouchableOpacity>
               </View>
               <View style={{ height: 30 }} />
@@ -881,6 +1124,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#090d16',
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
   },
   loginContainer: {
     flexGrow: 1,
@@ -888,6 +1132,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20,
     backgroundColor: '#090d16',
+  },
+  loginFooter: {
+    marginTop: 25,
+    marginBottom: 45,
+    alignItems: 'center',
+  },
+  loginFooterText: {
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '500',
+    letterSpacing: 0.5,
+    textAlign: 'center',
   },
   loginCard: {
     width: '100%',
@@ -1024,7 +1280,8 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   tabBar: {
-    height: 60,
+    height: Platform.OS === 'ios' ? 90 : 80,
+    paddingBottom: Platform.OS === 'ios' ? 25 : 20,
     backgroundColor: '#0d1324',
     borderTopWidth: 1,
     borderTopColor: 'rgba(255, 255, 255, 0.08)',

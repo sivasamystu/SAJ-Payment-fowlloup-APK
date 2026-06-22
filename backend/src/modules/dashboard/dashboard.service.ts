@@ -1,37 +1,75 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
+import { FirestoreService } from '../../firestore/firestore.service';
 
 @Injectable()
 export class DashboardService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private firestoreService: FirestoreService) {}
 
   async getMetrics(companyId: string) {
     const today = new Date();
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const startOfYear = new Date(today.getFullYear(), 0, 1);
 
-    // 1. Fetch Invoices for Company
-    const invoices = await this.prisma.invoice.findMany({
-      where: { companyId },
-      include: {
-        customer: true,
-        surveyWork: {
-          include: { assignedStaff: true },
-        },
-      },
+    // 1. Fetch Customers of the company once into memory
+    const customersSnap = await this.firestoreService.collection('customers')
+      .where('companyId', '==', companyId)
+      .get();
+    const customersMap = new Map<string, any>();
+    customersSnap.forEach(doc => {
+      customersMap.set(doc.id, doc.data());
     });
 
-    // 2. Fetch Payment Logs for Company
-    const paymentLogs = await this.prisma.paymentLog.findMany({
-      where: { companyId },
-      orderBy: { paymentDate: 'desc' },
-      take: 10,
-      include: {
-        invoice: {
-          include: { customer: true },
-        },
-      },
+    // 2. Fetch Users of the company once into memory
+    const usersSnap = await this.firestoreService.collection('users')
+      .where('companyId', '==', companyId)
+      .get();
+    const usersMap = new Map<string, any>();
+    usersSnap.forEach(doc => {
+      usersMap.set(doc.id, doc.data());
     });
+
+    // 3. Fetch Survey Works of the company once into memory
+    const surveyWorksSnap = await this.firestoreService.collection('survey-works')
+      .where('companyId', '==', companyId)
+      .get();
+    const surveyWorksMap = new Map<string, any>();
+    surveyWorksSnap.forEach(doc => {
+      const data = doc.data();
+      const assignedStaff = data.assignedStaffId ? usersMap.get(data.assignedStaffId) : null;
+      surveyWorksMap.set(doc.id, { ...data, assignedStaff });
+    });
+
+    // 4. Fetch Invoices for Company
+    const invoicesSnap = await this.firestoreService.collection('invoices')
+      .where('companyId', '==', companyId)
+      .get();
+    
+    const invoices = [];
+    invoicesSnap.forEach(doc => {
+      const data = doc.data();
+      const customer = customersMap.get(data.customerId) || { name: 'Unknown Customer' };
+      const surveyWork = data.surveyWorkId ? surveyWorksMap.get(data.surveyWorkId) : null;
+      invoices.push({
+        ...data,
+        customer,
+        surveyWork,
+      });
+    });
+
+    // 5. Fetch Payment Logs for Company
+    const paymentLogsSnap = await this.firestoreService.collection('payment-logs')
+      .where('companyId', '==', companyId)
+      .get();
+    
+    const paymentLogsAll = [];
+    paymentLogsSnap.forEach(doc => {
+      paymentLogsAll.push(doc.data());
+    });
+
+    // Sort logs by paymentDate desc and take 10
+    const paymentLogs = paymentLogsAll
+      .sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime())
+      .slice(0, 10);
 
     // Aggregate core numbers
     let totalInvoiced = 0;
@@ -52,7 +90,11 @@ export class DashboardService {
     const customerPendingMap = new Map<string, { name: string; pendingAmount: number }>();
     const staffPerformanceMap = new Map<string, { name: string; collected: number }>();
 
+    // Index invoices by ID for log lookups
+    const invoicesMap = new Map<string, any>();
+
     for (const invoice of invoices) {
+      invoicesMap.set(invoice.id, invoice);
       const total = Number(invoice.totalAmount);
       totalInvoiced += total;
 
@@ -61,7 +103,7 @@ export class DashboardService {
         totalCollection += total;
 
         // Check date
-        const paymentDate = invoice.updatedAt; // Paid invoices updatedAt acts as payment timestamp
+        const paymentDate = new Date(invoice.updatedAt); // Paid invoices updatedAt acts as payment timestamp
         if (paymentDate >= startOfMonth) {
           collectionThisMonth += total;
         }
@@ -86,9 +128,10 @@ export class DashboardService {
 
         // Customer Pending Map
         const customer = invoice.customer;
-        const current = customerPendingMap.get(customer.id) || { name: customer.name, pendingAmount: 0 };
+        const customerId = invoice.customerId;
+        const current = customerPendingMap.get(customerId) || { name: customer.name, pendingAmount: 0 };
         current.pendingAmount += total;
-        customerPendingMap.set(customer.id, current);
+        customerPendingMap.set(customerId, current);
 
         // Aging classification (days since invoice date)
         const diffTime = Math.abs(today.getTime() - new Date(invoice.invoiceDate).getTime());
@@ -125,12 +168,12 @@ export class DashboardService {
 
       // Sum collected in this month
       const collectedVal = invoices
-        .filter(inv => inv.status === 'PAID' && inv.updatedAt >= mStart && inv.updatedAt <= mEnd)
+        .filter(inv => inv.status === 'PAID' && new Date(inv.updatedAt) >= mStart && new Date(inv.updatedAt) <= mEnd)
         .reduce((sum, inv) => sum + Number(inv.totalAmount), 0);
 
       // Sum pending in this month
       const pendingVal = invoices
-        .filter(inv => inv.status !== 'PAID' && inv.invoiceDate >= mStart && inv.invoiceDate <= mEnd)
+        .filter(inv => inv.status !== 'PAID' && new Date(inv.invoiceDate) >= mStart && new Date(inv.invoiceDate) <= mEnd)
         .reduce((sum, inv) => sum + Number(inv.totalAmount), 0);
 
       monthlyCollection.push({
@@ -153,14 +196,17 @@ export class DashboardService {
       agingBuckets,
       topPendingCustomers,
       staffPerformance,
-      recentPayments: paymentLogs.map(log => ({
-        id: log.id,
-        invoiceNumber: log.invoice.invoiceNumber,
-        customerName: log.invoice.customer.name,
-        amount: Number(log.amountPaid),
-        paymentDate: log.paymentDate,
-        ref: log.transactionReference,
-      })),
+      recentPayments: paymentLogs.map(log => {
+        const invoice = invoicesMap.get(log.invoiceId) || { invoiceNumber: 'Unknown', customer: { name: 'Unknown' } };
+        return {
+          id: log.id,
+          invoiceNumber: invoice.invoiceNumber,
+          customerName: invoice.customer.name,
+          amount: Number(log.amountPaid),
+          paymentDate: log.paymentDate,
+          ref: log.transactionReference,
+        };
+      }),
       monthlyCollection,
     };
   }

@@ -1,58 +1,88 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-import { SubscriptionStatus } from '@prisma/client';
+import { FirestoreService } from '../../firestore/firestore.service';
+
+export type SubscriptionStatus = 'active' | 'trial' | 'suspended' | 'expired';
 
 @Injectable()
 export class CompaniesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private firestoreService: FirestoreService) {}
 
   async findAll() {
-    return this.prisma.company.findMany({
-      include: {
+    const snap = await this.firestoreService.collection('companies').get();
+    const list = [];
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      
+      // Get counts
+      const usersSnap = await this.firestoreService.collection('users').where('companyId', '==', doc.id).get();
+      const customersSnap = await this.firestoreService.collection('customers').where('companyId', '==', doc.id).get();
+      const invoicesSnap = await this.firestoreService.collection('invoices').where('companyId', '==', doc.id).get();
+      
+      list.push({
+        ...data,
         _count: {
-          select: { users: true, customers: true, invoices: true },
-        },
-      },
-    });
+          users: usersSnap.size,
+          customers: customersSnap.size,
+          invoices: invoicesSnap.size,
+        }
+      });
+    }
+    return list;
   }
 
   async findOne(id: string) {
-    const company = await this.prisma.company.findUnique({
-      where: { id },
-      include: {
-        users: true,
-        customers: true,
-      },
-    });
-    if (!company) {
+    const doc = await this.firestoreService.collection('companies').doc(id).get();
+    if (!doc.exists) {
       throw new NotFoundException('Company not found');
     }
-    return company;
+    const data = doc.data();
+    
+    // Include users and customers
+    const usersSnap = await this.firestoreService.collection('users').where('companyId', '==', id).get();
+    const customersSnap = await this.firestoreService.collection('customers').where('companyId', '==', id).get();
+    
+    const users = usersSnap.docs.map(d => d.data());
+    const customers = customersSnap.docs.map(d => d.data());
+    
+    return {
+      ...data,
+      users,
+      customers,
+    };
   }
 
   async create(data: { name: string; subscriptionPlan?: string }) {
-    return this.prisma.company.create({
-      data: {
-        name: data.name,
-        subscriptionPlan: data.subscriptionPlan || 'basic',
-        subscriptionStatus: 'trial',
-      },
-    });
+    const ref = this.firestoreService.collection('companies').doc();
+    const company = {
+      id: ref.id,
+      name: data.name,
+      subscriptionPlan: data.subscriptionPlan || 'basic',
+      subscriptionStatus: 'trial' as SubscriptionStatus,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await ref.set(company);
+    return company;
   }
 
   async updateSubscription(id: string, status: SubscriptionStatus, plan?: string) {
-    return this.prisma.company.update({
-      where: { id },
-      data: {
-        subscriptionStatus: status,
-        subscriptionPlan: plan,
-      },
-    });
+    const ref = this.firestoreService.collection('companies').doc(id);
+    const updateData: any = {
+      subscriptionStatus: status,
+      updatedAt: new Date().toISOString(),
+    };
+    if (plan) {
+      updateData.subscriptionPlan = plan;
+    }
+    await ref.update(updateData);
+    
+    // return updated document
+    const updated = await ref.get();
+    return updated.data();
   }
 
   async remove(id: string) {
-    return this.prisma.company.delete({
-      where: { id },
-    });
+    await this.firestoreService.collection('companies').doc(id).delete();
+    return { id, deleted: true };
   }
 }

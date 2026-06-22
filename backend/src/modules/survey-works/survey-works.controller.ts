@@ -30,7 +30,7 @@ export class SurveyWorksController {
 
   @Get(':id')
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {
-    const work = await this.surveyWorksService.findOne(id, user.companyId);
+    const work = (await this.surveyWorksService.findOne(id, user.companyId)) as any;
     if (user.role === 'STAFF' && work.assignedStaffId !== user.id) {
       throw new ForbiddenException('You do not have access to view this survey work');
     }
@@ -68,7 +68,7 @@ export class SurveyWorksController {
     },
   ) {
     // If staff is editing, prevent changing assignment or company
-    const work = await this.surveyWorksService.findOne(id, user.companyId);
+    const work = (await this.surveyWorksService.findOne(id, user.companyId)) as any;
     if (user.role === 'STAFF') {
       if (work.assignedStaffId !== user.id) {
         throw new ForbiddenException('You can only update works assigned to you');

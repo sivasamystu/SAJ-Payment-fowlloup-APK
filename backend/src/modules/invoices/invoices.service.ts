@@ -1,47 +1,111 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
+import { FirestoreService } from '../../firestore/firestore.service';
 import { RazorpayService } from '../integrations/razorpay.service';
 import { WatiService, WatiTemplateParam } from '../integrations/wati.service';
-import { PaymentStatus, ReminderType } from '@prisma/client';
+
+export type PaymentStatus = 'PENDING' | 'PARTIALLY_PAID' | 'PAID' | 'OVERDUE';
+export type ReminderType =
+  | 'PAYMENT_REQUEST'
+  | 'GENTLE_REMINDER'
+  | 'PENDING_PAYMENT'
+  | 'OVERDUE_PAYMENT'
+  | 'PAYMENT_RECEIVED';
 
 @Injectable()
 export class InvoicesService {
   private readonly logger = new Logger(InvoicesService.name);
 
   constructor(
-    private prisma: PrismaService,
+    private firestoreService: FirestoreService,
     private razorpayService: RazorpayService,
     private watiService: WatiService,
   ) {}
 
   async findAll(companyId: string) {
-    return this.prisma.invoice.findMany({
-      where: { companyId },
-      include: {
-        customer: true,
-        surveyWork: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const snap = await this.firestoreService.collection('invoices')
+      .where('companyId', '==', companyId)
+      .get();
+    
+    const invoices = [];
+    for (const doc of snap.docs) {
+      const invoice = doc.data() as any;
+      
+      // Fetch customer
+      const customerSnap = await this.firestoreService.collection('customers').doc(invoice.customerId).get();
+      const customer = customerSnap.exists ? customerSnap.data() as any : null;
+
+      // Fetch surveyWork
+      let surveyWork = null;
+      if (invoice.surveyWorkId) {
+        const surveyWorkSnap = await this.firestoreService.collection('survey-works').doc(invoice.surveyWorkId).get();
+        surveyWork = surveyWorkSnap.exists ? surveyWorkSnap.data() as any : null;
+      }
+
+      invoices.push({
+        ...invoice,
+        customer,
+        surveyWork,
+      });
+    }
+    // Sort by createdAt desc
+    return invoices.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  async findOne(id: string, companyId: string) {
-    const invoice = await this.prisma.invoice.findFirst({
-      where: { id, companyId },
-      include: {
-        customer: true,
-        surveyWork: true,
-        reminderHistories: {
-          include: { triggeringUser: true },
-          orderBy: { sentDate: 'desc' },
-        },
-        paymentLogs: true,
-      },
-    });
-    if (!invoice) {
+  async findOne(id: string, companyId: string): Promise<any> {
+    const invoiceDoc = await this.firestoreService.collection('invoices').doc(id).get();
+    if (!invoiceDoc.exists) {
       throw new NotFoundException('Invoice not found');
     }
-    return invoice;
+    const invoice = invoiceDoc.data() as any;
+    if (invoice.companyId !== companyId) {
+      throw new NotFoundException('Invoice not found');
+    }
+
+    // Fetch customer
+    const customerSnap = await this.firestoreService.collection('customers').doc(invoice.customerId).get();
+    const customer = customerSnap.exists ? customerSnap.data() as any : null;
+
+    // Fetch surveyWork
+    let surveyWork = null;
+    if (invoice.surveyWorkId) {
+      const surveyWorkSnap = await this.firestoreService.collection('survey-works').doc(invoice.surveyWorkId).get();
+      surveyWork = surveyWorkSnap.exists ? surveyWorkSnap.data() as any : null;
+    }
+
+    // Fetch reminderHistories
+    const reminderHistoriesSnap = await this.firestoreService.collection('reminder-history')
+      .where('invoiceId', '==', id)
+      .get();
+    
+    const reminderHistories = [];
+    for (const doc of reminderHistoriesSnap.docs) {
+      const data = doc.data() as any;
+      let triggeringUser = null;
+      if (data.triggeredBy) {
+        const userSnap = await this.firestoreService.collection('users').doc(data.triggeredBy).get();
+        triggeringUser = userSnap.exists ? userSnap.data() as any : null;
+      }
+      reminderHistories.push({
+        ...data,
+        triggeringUser,
+      });
+    }
+    // Sort reminderHistories by sentDate desc
+    reminderHistories.sort((a, b) => new Date(b.sentDate).getTime() - new Date(a.sentDate).getTime());
+
+    // Fetch paymentLogs
+    const paymentLogsSnap = await this.firestoreService.collection('payment-logs')
+      .where('invoiceId', '==', id)
+      .get();
+    const paymentLogs = paymentLogsSnap.docs.map(doc => doc.data() as any);
+
+    return {
+      ...invoice,
+      customer,
+      surveyWork,
+      reminderHistories,
+      paymentLogs,
+    };
   }
 
   async create(
@@ -68,41 +132,50 @@ export class InvoicesService {
     const day = String(dateObj.getDate()).padStart(2, '0');
     const dateString = `${year}${month}${day}`;
 
-    const countToday = await this.prisma.invoice.count({
-      where: {
-        companyId,
-        createdAt: {
-          gte: new Date(new Date(dateObj).setHours(0, 0, 0, 0)),
-          lte: new Date(new Date(dateObj).setHours(23, 59, 59, 999)),
-        },
-      },
-    });
+    // Query count of invoices created today
+    const startOfDay = new Date(dateObj.setHours(0, 0, 0, 0)).toISOString();
+    const endOfDay = new Date(dateObj.setHours(23, 59, 59, 999)).toISOString();
+
+    const todayInvoices = await this.firestoreService.collection('invoices')
+      .where('companyId', '==', companyId)
+      .where('createdAt', '>=', startOfDay)
+      .where('createdAt', '<=', endOfDay)
+      .get();
+    
+    const countToday = todayInvoices.size;
     const suffix = String(countToday + 1).padStart(4, '0');
     const invoiceNumber = `INV-${dateString}-${suffix}`;
 
     // Get Customer
-    const customer = await this.prisma.customer.findFirst({
-      where: { id: data.customerId, companyId },
-    });
-    if (!customer) {
+    const customerSnap = await this.firestoreService.collection('customers').doc(data.customerId).get();
+    if (!customerSnap.exists) {
+      throw new NotFoundException('Customer not found');
+    }
+    const customer = customerSnap.data() as any;
+    if (customer.companyId !== companyId) {
       throw new NotFoundException('Customer not found');
     }
 
-    // 3. Create Invoice placeholder in database
-    const invoice = await this.prisma.invoice.create({
-      data: {
-        companyId,
-        invoiceNumber,
-        invoiceDate: new Date(data.invoiceDate),
-        dueDate: new Date(data.dueDate),
-        customerId: data.customerId,
-        surveyWorkId: data.surveyWorkId || null,
-        amount,
-        gstAmount,
-        totalAmount,
-        status: 'PENDING',
-      },
-    });
+    // 3. Create Invoice document in Firestore
+    const ref = this.firestoreService.collection('invoices').doc();
+    const invoice = {
+      id: ref.id,
+      companyId,
+      invoiceNumber,
+      invoiceDate: new Date(data.invoiceDate).toISOString(),
+      dueDate: new Date(data.dueDate).toISOString(),
+      customerId: data.customerId,
+      surveyWorkId: data.surveyWorkId || null,
+      amount,
+      gstAmount,
+      totalAmount,
+      status: 'PENDING' as PaymentStatus,
+      paymentLink: '',
+      paymentLinkId: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await ref.set(invoice);
 
     // 4. Generate Razorpay Link
     let paymentLink = '';
@@ -113,7 +186,7 @@ export class InvoicesService {
         totalAmount,
         {
           name: customer.name,
-          email: customer.email,
+          email: customer.email || undefined,
           contact: customer.whatsapp || customer.mobile,
         },
         new Date(data.dueDate),
@@ -122,19 +195,18 @@ export class InvoicesService {
       paymentLinkId = pl.id;
 
       // Update Invoice with payment details
-      await this.prisma.invoice.update({
-        where: { id: invoice.id },
-        data: { paymentLink, paymentLinkId },
-      });
+      invoice.paymentLink = paymentLink;
+      invoice.paymentLinkId = paymentLinkId;
+      await ref.update({ paymentLink, paymentLinkId, updatedAt: new Date().toISOString() });
     } catch (err) {
       this.logger.error(`Razorpay generation failed for ${invoiceNumber}: ${err.message}`);
     }
 
     // 5. Update SurveyWork status to BILLED
     if (data.surveyWorkId) {
-      await this.prisma.surveyWork.update({
-        where: { id: data.surveyWorkId },
-        data: { status: 'BILLED' },
+      await this.firestoreService.collection('survey-works').doc(data.surveyWorkId).update({
+        status: 'BILLED',
+        updatedAt: new Date().toISOString(),
       });
     }
 
@@ -172,20 +244,20 @@ export class InvoicesService {
         Number(invoice.totalAmount),
         {
           name: invoice.customer.name,
-          email: invoice.customer.email,
+          email: invoice.customer.email || undefined,
           contact: invoice.customer.whatsapp || invoice.customer.mobile,
         },
         new Date(invoice.dueDate),
       );
 
-      return this.prisma.invoice.update({
-        where: { id },
-        data: {
-          paymentLink: pl.short_url,
-          paymentLinkId: pl.id,
-        },
-        include: { customer: true, surveyWork: true },
+      const ref = this.firestoreService.collection('invoices').doc(id);
+      await ref.update({
+        paymentLink: pl.short_url,
+        paymentLinkId: pl.id,
+        updatedAt: new Date().toISOString(),
       });
+
+      return this.findOne(id, companyId);
     } catch (err) {
       throw new BadRequestException(`Failed to regenerate link: ${err.message}`);
     }
@@ -262,16 +334,20 @@ export class InvoicesService {
       params,
     );
 
-    return this.prisma.reminderHistory.create({
-      data: {
-        companyId,
-        invoiceId,
-        customerId,
-        type: reminderType,
-        deliveryStatus: result.success ? 'SENT' : 'FAILED',
-        watiResponse: result.responseData as any,
-        triggeredBy: triggeredBy || null,
-      },
-    });
+    const ref = this.firestoreService.collection('reminder-history').doc();
+    const log = {
+      id: ref.id,
+      companyId,
+      invoiceId,
+      customerId,
+      type: reminderType,
+      sentDate: new Date().toISOString(),
+      deliveryStatus: result.success ? 'SENT' : 'FAILED',
+      watiResponse: result.responseData || null,
+      triggeredBy: triggeredBy || null,
+      createdAt: new Date().toISOString(),
+    };
+    await ref.set(log);
+    return log;
   }
 }

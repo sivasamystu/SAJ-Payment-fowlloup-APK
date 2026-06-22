@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
-import { PrismaModule } from './prisma/prisma.module';
+import { FirestoreModule } from './firestore/firestore.module';
 import { CompaniesModule } from './modules/companies/companies.module';
 import { UsersModule } from './modules/users/users.module';
 import { CustomersModule } from './modules/customers/customers.module';
@@ -11,6 +11,7 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { SchedulerModule } from './modules/scheduler/scheduler.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { AuthModule } from './modules/auth/auth.module';
 
 @Module({
   imports: [
@@ -18,7 +19,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
       isGlobal: true,
     }),
     ScheduleModule.forRoot(),
-    PrismaModule,
+    FirestoreModule,
     CompaniesModule,
     UsersModule,
     CustomersModule,
@@ -28,6 +29,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     SchedulerModule,
     WebhooksModule,
     DashboardModule,
+    AuthModule,
   ],
 })
 export class AppModule {}

@@ -6,13 +6,15 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { PrismaService } from '../../prisma/prisma.service';
+import { FirestoreService } from '../../firestore/firestore.service';
+import { AuthService } from '../../modules/auth/auth.service';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
     private reflector: Reflector,
-    private prisma: PrismaService,
+    private firestoreService: FirestoreService,
+    private authService: AuthService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -28,27 +30,44 @@ export class AuthGuard implements CanActivate {
     if (!authHeader) {
       if (useMock) {
         // Log in as a default tenant admin mock user for convenience
-        let mockUser = await this.prisma.user.findFirst({
-          include: { company: true },
-        });
+        const usersSnap = await this.firestoreService.collection('users').limit(1).get();
+        let mockUser: any = null;
 
-        if (!mockUser) {
+        if (!usersSnap.empty) {
+          const userDoc = usersSnap.docs[0];
+          const userData = userDoc.data() as any;
+          let company: any = null;
+          if (userData.companyId) {
+            const companySnap = await this.firestoreService.collection('companies').doc(userData.companyId).get();
+            if (companySnap.exists) {
+              company = companySnap.data() as any;
+            }
+          }
+          mockUser = { ...userData, company };
+        } else {
           // Auto seed standard mock companies and users if db is empty during dev run
-          const company = await this.prisma.company.create({
-            data: { name: 'SAJ Surveys Demo Corp', subscriptionStatus: 'active' },
-          });
+          const companyRef = this.firestoreService.collection('companies').doc();
+          const companyData = {
+            id: companyRef.id,
+            name: 'SAJ Surveys Demo Corp',
+            subscriptionStatus: 'active',
+            createdAt: new Date().toISOString(),
+          };
+          await companyRef.set(companyData);
 
-          mockUser = await this.prisma.user.create({
-            data: {
-              id: 'mock_uid_123',
-              email: 'admin@sajsurveys.com',
-              name: 'SAJ Admin',
-              role: 'TENANT_ADMIN',
-              companyId: company.id,
-              mobileNumber: '+919876543210',
-            },
-            include: { company: true },
-          });
+          const userRef = this.firestoreService.collection('users').doc('mock_uid_123');
+          const userData = {
+            id: 'mock_uid_123',
+            email: 'admin@sajsurveys.com',
+            name: 'SAJ Admin',
+            role: 'TENANT_ADMIN',
+            companyId: companyRef.id,
+            mobileNumber: '+919876543210',
+            isActive: true,
+            createdAt: new Date().toISOString(),
+          };
+          await userRef.set(userData);
+          mockUser = { ...userData, company: companyData };
         }
 
         request.user = mockUser;
@@ -63,6 +82,39 @@ export class AuthGuard implements CanActivate {
     }
 
     try {
+      if (token.startsWith('otp_session_')) {
+        if (!this.authService.isSessionActive(token)) {
+          throw new UnauthorizedException('Session has been logged out or invalidated');
+        }
+
+        const parts = token.split(':');
+        const sessionPrefixAndUserId = parts[0];
+        const userId = sessionPrefixAndUserId.replace('otp_session_', '');
+        
+        const userSnap = await this.firestoreService.collection('users').doc(userId).get();
+        if (!userSnap.exists) {
+          throw new UnauthorizedException('User session not found');
+        }
+
+        const userData = userSnap.data() as any;
+        let company: any = null;
+        if (userData.companyId) {
+          const companySnap = await this.firestoreService.collection('companies').doc(userData.companyId).get();
+          if (companySnap.exists) {
+            company = companySnap.data() as any;
+          }
+        }
+
+        const dbUser = { ...userData, company };
+
+        if (!dbUser.isActive) {
+          throw new ForbiddenException('User account is disabled');
+        }
+
+        request.user = dbUser;
+        return this.matchRoles(requiredRoles, dbUser.role);
+      }
+
       let uid: string;
       let email: string;
       let name: string;
@@ -82,31 +134,49 @@ export class AuthGuard implements CanActivate {
       }
 
       // Check DB for this user
-      let dbUser = await this.prisma.user.findUnique({
-        where: { id: uid },
-        include: { company: true },
-      });
+      const userSnap = await this.firestoreService.collection('users').doc(uid).get();
+      let dbUser: any = null;
 
-      // If user does not exist in DB yet but validated by Firebase, create user
-      if (!dbUser) {
+      if (userSnap.exists) {
+        const userData = userSnap.data() as any;
+        let company: any = null;
+        if (userData.companyId) {
+          const companySnap = await this.firestoreService.collection('companies').doc(userData.companyId).get();
+          if (companySnap.exists) {
+            company = companySnap.data() as any;
+          }
+        }
+        dbUser = { ...userData, company };
+      } else {
         // Find or create default demo company for new mock users
-        let defaultCompany = await this.prisma.company.findFirst();
-        if (!defaultCompany) {
-          defaultCompany = await this.prisma.company.create({
-            data: { name: 'SAJ Surveys Demo Corp' },
-          });
+        const companiesSnap = await this.firestoreService.collection('companies').limit(1).get();
+        let defaultCompany: any = null;
+
+        if (!companiesSnap.empty) {
+          defaultCompany = companiesSnap.docs[0].data() as any;
+        } else {
+          const companyRef = this.firestoreService.collection('companies').doc();
+          defaultCompany = {
+            id: companyRef.id,
+            name: 'SAJ Surveys Demo Corp',
+            subscriptionStatus: 'active',
+            createdAt: new Date().toISOString(),
+          };
+          await companyRef.set(defaultCompany);
         }
 
-        dbUser = await this.prisma.user.create({
-          data: {
-            id: uid,
-            email,
-            name,
-            role: 'STAFF',
-            companyId: defaultCompany.id,
-          },
-          include: { company: true },
-        });
+        const userRef = this.firestoreService.collection('users').doc(uid);
+        const userData = {
+          id: uid,
+          email,
+          name,
+          role: 'STAFF',
+          companyId: defaultCompany.id,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+        };
+        await userRef.set(userData);
+        dbUser = { ...userData, company: defaultCompany };
       }
 
       if (!dbUser.isActive) {

@@ -18,6 +18,11 @@ out/
 .env.development.local
 .env.test.local
 .env.production.local
+service-account.json
+firebase-service-account.json
+*.json.key
+key.json
+
 
 # Logs
 npm-debug.log*
