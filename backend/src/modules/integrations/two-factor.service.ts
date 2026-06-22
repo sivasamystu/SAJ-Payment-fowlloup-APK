@@ -46,20 +46,17 @@ export class TwoFactorService {
 
     try {
       const url = `https://2factor.in/API/V1/${this.apiKey}/ADDON_SERVICES/SEND/TSMS`;
-      const response = await axios.post(
-        url,
-        {
+      const response = await axios.get(url, {
+        params: {
           From: this.senderId,
           To: formattedNumber,
           TemplateName: this.templateName,
           VAR1: otp,
         },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
+        headers: {
+          'Content-Type': 'application/json',
         },
-      );
+      });
 
       const isSuccess = response.data?.Status === 'Success';
       if (isSuccess) {
