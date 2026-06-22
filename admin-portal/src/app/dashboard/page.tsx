@@ -123,7 +123,7 @@ export default function Dashboard() {
     <DashboardLayout>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Collection Analytics Dashboard</h1>
+          <h1 className="page-title">Collection Analytics Dashboard..</h1>
           <p className="page-subtitle">
             Overview of payments, collection performance, and aging accounts.
             {apiActive ? (
@@ -234,7 +234,7 @@ export default function Dashboard() {
         <div className="glass-card" style={{ display: 'flex', flexDirection: 'column' }}>
           <h3 style={{ fontSize: '1.15rem', marginBottom: '0.25rem' }}>Aging Recovery</h3>
           <p style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '1.5rem' }}>Outstanding invoices sorted by date</p>
-          
+
           <div className="aging-report-container">
             <div className="aging-bar-group">
               <div className="aging-bar-label">
