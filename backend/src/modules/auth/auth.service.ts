@@ -127,21 +127,15 @@ export class AuthService {
 
       if (!result.success) {
         this.logger.warn(`Failed to dispatch OTP SMS: ${JSON.stringify(result.responseData)}`);
-        return {
-          success: true,
-          message: 'OTP generated. SMS dispatch failed, falling back to mock (look in backend logs).',
-        };
+        return { success: false, message: 'OTP dispatch failed. Please try again later.' };
       }
 
-      return {
-        success: true,
-        message: 'OTP dispatched via SMS.',
-      };
+      return { success: true, message: 'OTP dispatched via SMS.' };
     } catch (err) {
       this.logger.error(`Error sending OTP SMS: ${err.message}`);
       return {
-        success: true,
-        message: 'OTP generated. SMS dispatch error, falling back to mock (look in backend logs).',
+        success: false,
+        message: 'OTP dispatch failed. Please try again later.',
       };
     }
   }
