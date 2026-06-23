@@ -1,0 +1,16 @@
+.git
+.github
+.firebase
+
+admin-portal/node_modules
+admin-portal/dist
+admin-portal/.next
+
+mobile-app/node_modules
+
+backend/node_modules
+backend/dist
+backend/.env
+
+firebase-debug.log
+npm-debug.log
